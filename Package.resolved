@@ -6,8 +6,8 @@
         "repositoryURL": "https://github.com/SDWebImage/libwebp-Xcode.git",
         "state": {
           "branch": null,
-          "revision": "86c1b5d567ed548da861486b54e1f8f068a3cef7",
-          "version": "1.1.0"
+          "revision": "0d60654eeefd5d7d2bef3835804892c40225e8b2",
+          "version": "1.5.0"
         }
       },
       {
@@ -15,8 +15,8 @@
         "repositoryURL": "https://github.com/SDWebImage/SDWebImage.git",
         "state": {
           "branch": null,
-          "revision": "59730af512c06fb569c119d737df4c1c499e001d",
-          "version": "5.18.10"
+          "revision": "cac9a55a3ae92478a2c95042dcc8d9695d2129ca",
+          "version": "5.21.0"
         }
       }
     ]
