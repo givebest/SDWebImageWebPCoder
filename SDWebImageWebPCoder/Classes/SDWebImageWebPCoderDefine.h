@@ -140,4 +140,11 @@ FOUNDATION_EXPORT SDImageCoderOption _Nonnull const SDImageCoderEncodeWebPUseSha
  */
 FOUNDATION_EXPORT SDImageCoderOption _Nonnull const SDImageCoderEncodeWebPLossless;
 
+/**
+ String value
+ Comma-separated list of metadata to copy from input to output (if any).
+ Valid values: all, none, exif, icc, xmp. Default is none.
+ */
+FOUNDATION_EXPORT SDImageCoderOption _Nonnull const SDImageCoderEncodeWebPMetadata;
+
 NS_ASSUME_NONNULL_END

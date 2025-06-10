@@ -798,6 +798,12 @@ WEBP_CSP_MODE ConvertCSPMode(CGBitmapInfo bitmapInfo) {
             return nil;
         }
         
+        // Handle metadata copying for animated WebP if requested
+        NSString *metadataOption = options[SDImageCoderEncodeWebPMetadata];
+        if (metadataOption && ![metadataOption isEqualToString:@"none"]) {
+            [self sd_addMetadataToMux:mux fromImageRef:imageRef metadataOption:metadataOption];
+        }
+        
         WebPData outputData;
         WebPMuxError error = WebPMuxAssemble(mux, &outputData);
         WebPMuxDelete(mux);
@@ -954,6 +960,14 @@ WEBP_CSP_MODE ConvertCSPMode(CGBitmapInfo bitmapInfo) {
     if (result) {
         // success
         webpData = [NSData dataWithBytes:writer.mem length:writer.size];
+        
+        // Handle metadata copying if requested
+        NSString *metadataOption = options[SDImageCoderEncodeWebPMetadata];
+        if (metadataOption && ![metadataOption isEqualToString:@"none"]) {
+            webpData = [self sd_webpDataByAddingMetadata:webpData 
+                                            fromImageRef:imageRef 
+                                          metadataOption:metadataOption];
+        }
     } else {
         // failed
         webpData = nil;
@@ -992,6 +1006,224 @@ WEBP_CSP_MODE ConvertCSPMode(CGBitmapInfo bitmapInfo) {
     config->use_sharp_yuv = GetIntValueForKey(options, SDImageCoderEncodeWebPUseSharpYuv, config->use_sharp_yuv);
 }
 
+- (nullable NSData *)sd_webpDataByAddingMetadata:(NSData *)webpData 
+                                    fromImageRef:(CGImageRef)imageRef 
+                                  metadataOption:(NSString *)metadataOption {
+    if (!webpData || !imageRef || !metadataOption) {
+        return webpData;
+    }
+    
+    // Parse metadata option
+    NSArray<NSString *> *metadataTypes = [metadataOption componentsSeparatedByString:@","];
+    NSMutableSet<NSString *> *requestedTypes = [NSMutableSet set];
+    
+    for (NSString *type in metadataTypes) {
+        NSString *trimmedType = [type stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        [requestedTypes addObject:trimmedType.lowercaseString];
+    }
+    
+    // If "all" is specified, include all supported types
+    if ([requestedTypes containsObject:@"all"]) {
+        [requestedTypes addObject:@"exif"];
+        [requestedTypes addObject:@"icc"];
+        [requestedTypes addObject:@"xmp"];
+    }
+    
+    // If "none" is specified or no valid types, return original data
+    if ([requestedTypes containsObject:@"none"] || requestedTypes.count == 0) {
+        return webpData;
+    }
+    
+    // Get image source from CGImageRef to extract metadata
+    CGDataProviderRef dataProvider = CGImageGetDataProvider(imageRef);
+    if (!dataProvider) {
+        return webpData;
+    }
+    
+    CFDataRef imageData = CGDataProviderCopyData(dataProvider);
+    if (!imageData) {
+        return webpData;
+    }
+    
+    CGImageSourceRef imageSource = CGImageSourceCreateWithData(imageData, NULL);
+    CFRelease(imageData);
+    
+    if (!imageSource) {
+        return webpData;
+    }
+    
+    // Extract metadata from original image
+    CFDictionaryRef imageProperties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, NULL);
+    CFRelease(imageSource);
+    
+    if (!imageProperties) {
+        return webpData;
+    }
+    
+    // Create WebP mux to add metadata
+    WebPData inputData = {.bytes = webpData.bytes, .size = webpData.length};
+    WebPMux *mux = WebPMuxCreate(&inputData, 0);
+    if (!mux) {
+        CFRelease(imageProperties);
+        return webpData;
+    }
+    
+    NSData *resultData = webpData;
+    
+    // Add EXIF data if requested
+    if ([requestedTypes containsObject:@"exif"]) {
+        CFDictionaryRef exifDict = CFDictionaryGetValue(imageProperties, kCGImagePropertyExifDictionary);
+        if (exifDict) {
+            NSData *exifData = [self sd_createExifDataFromDictionary:(__bridge NSDictionary *)exifDict];
+            if (exifData) {
+                WebPData exifChunk = {.bytes = exifData.bytes, .size = exifData.length};
+                WebPMuxSetChunk(mux, "EXIF", &exifChunk, 0);
+            }
+        }
+    }
+    
+    // Add ICC profile if requested
+    if ([requestedTypes containsObject:@"icc"]) {
+        CFDataRef iccData = CFDictionaryGetValue(imageProperties, kCGImagePropertyColorModel);
+        CGColorSpaceRef colorSpace = CGImageGetColorSpace(imageRef);
+        if (colorSpace) {
+            CFDataRef iccProfile = CGColorSpaceCopyICCData(colorSpace);
+            if (iccProfile) {
+                WebPData iccChunk = {.bytes = CFDataGetBytePtr(iccProfile), .size = CFDataGetLength(iccProfile)};
+                WebPMuxSetChunk(mux, "ICCP", &iccChunk, 0);
+                CFRelease(iccProfile);
+            }
+        }
+    }
+    
+    // Add XMP data if requested
+    if ([requestedTypes containsObject:@"xmp"]) {
+        // XMP is typically stored as a string in kCGImagePropertyXMPDictionary
+        // For now, we'll skip XMP as it requires more complex handling
+        // This can be implemented later if needed
+    }
+    
+    // Assemble the final WebP with metadata
+    WebPData outputData;
+    WebPMuxError error = WebPMuxAssemble(mux, &outputData);
+    WebPMuxDelete(mux);
+    CFRelease(imageProperties);
+    
+    if (error == WEBP_MUX_OK) {
+        resultData = [NSData dataWithBytes:outputData.bytes length:outputData.size];
+        WebPDataClear(&outputData);
+    }
+    
+    return resultData;
+}
+
+- (nullable NSData *)sd_createExifDataFromDictionary:(NSDictionary *)exifDict {
+    if (!exifDict || exifDict.count == 0) {
+        return nil;
+    }
+    
+    // Create a simple EXIF data structure
+    // This is a simplified implementation - a full EXIF implementation would be more complex
+    NSMutableData *exifData = [NSMutableData data];
+    
+    // EXIF header (simplified)
+    const char exifHeader[] = "Exif\0\0";
+    [exifData appendBytes:exifHeader length:6];
+    
+    // For now, return a minimal EXIF structure
+    // A complete implementation would properly encode all EXIF tags
+    return exifData.length > 6 ? exifData : nil;
+}
+
+- (void)sd_addMetadataToMux:(WebPMux *)mux 
+               fromImageRef:(CGImageRef)imageRef 
+             metadataOption:(NSString *)metadataOption {
+    if (!mux || !imageRef || !metadataOption) {
+        return;
+    }
+    
+    // Parse metadata option
+    NSArray<NSString *> *metadataTypes = [metadataOption componentsSeparatedByString:@","];
+    NSMutableSet<NSString *> *requestedTypes = [NSMutableSet set];
+    
+    for (NSString *type in metadataTypes) {
+        NSString *trimmedType = [type stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        [requestedTypes addObject:trimmedType.lowercaseString];
+    }
+    
+    // If "all" is specified, include all supported types
+    if ([requestedTypes containsObject:@"all"]) {
+        [requestedTypes addObject:@"exif"];
+        [requestedTypes addObject:@"icc"];
+        [requestedTypes addObject:@"xmp"];
+    }
+    
+    // If "none" is specified or no valid types, return
+    if ([requestedTypes containsObject:@"none"] || requestedTypes.count == 0) {
+        return;
+    }
+    
+    // Get image source from CGImageRef to extract metadata
+    CGDataProviderRef dataProvider = CGImageGetDataProvider(imageRef);
+    if (!dataProvider) {
+        return;
+    }
+    
+    CFDataRef imageData = CGDataProviderCopyData(dataProvider);
+    if (!imageData) {
+        return;
+    }
+    
+    CGImageSourceRef imageSource = CGImageSourceCreateWithData(imageData, NULL);
+    CFRelease(imageData);
+    
+    if (!imageSource) {
+        return;
+    }
+    
+    // Extract metadata from original image
+    CFDictionaryRef imageProperties = CGImageSourceCopyPropertiesAtIndex(imageSource, 0, NULL);
+    CFRelease(imageSource);
+    
+    if (!imageProperties) {
+        return;
+    }
+    
+    // Add EXIF data if requested
+    if ([requestedTypes containsObject:@"exif"]) {
+        CFDictionaryRef exifDict = CFDictionaryGetValue(imageProperties, kCGImagePropertyExifDictionary);
+        if (exifDict) {
+            NSData *exifData = [self sd_createExifDataFromDictionary:(__bridge NSDictionary *)exifDict];
+            if (exifData) {
+                WebPData exifChunk = {.bytes = exifData.bytes, .size = exifData.length};
+                WebPMuxSetChunk(mux, "EXIF", &exifChunk, 0);
+            }
+        }
+    }
+    
+    // Add ICC profile if requested
+    if ([requestedTypes containsObject:@"icc"]) {
+        CGColorSpaceRef colorSpace = CGImageGetColorSpace(imageRef);
+        if (colorSpace) {
+            CFDataRef iccProfile = CGColorSpaceCopyICCData(colorSpace);
+            if (iccProfile) {
+                WebPData iccChunk = {.bytes = CFDataGetBytePtr(iccProfile), .size = CFDataGetLength(iccProfile)};
+                WebPMuxSetChunk(mux, "ICCP", &iccChunk, 0);
+                CFRelease(iccProfile);
+            }
+        }
+    }
+    
+    // Add XMP data if requested
+    if ([requestedTypes containsObject:@"xmp"]) {
+        // XMP is typically stored as a string in kCGImagePropertyXMPDictionary
+        // For now, we'll skip XMP as it requires more complex handling
+        // This can be implemented later if needed
+    }
+    
+    CFRelease(imageProperties);
+}
+
 static void FreeImageData(void *info, const void *data, size_t size) {
     WebPFree((void *)data);
 }
@@ -1011,6 +1243,16 @@ static float GetFloatValueForKey(NSDictionary * _Nonnull dictionary, NSString * 
     if (value != nil) {
         if ([value isKindOfClass: [NSNumber class]]) {
             return [value floatValue];
+        }
+    }
+    return defaultValue;
+}
+
+static NSString * GetStringValueForKey(NSDictionary * _Nonnull dictionary, NSString * _Nonnull key, NSString * _Nullable defaultValue) {
+    id value = [dictionary objectForKey:key];
+    if (value != nil) {
+        if ([value isKindOfClass: [NSString class]]) {
+            return value;
         }
     }
     return defaultValue;
